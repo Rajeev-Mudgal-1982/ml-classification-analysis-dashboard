@@ -5,9 +5,14 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import *
 
 # =====================================================
@@ -23,73 +28,47 @@ MODEL_FOLDER = "model"
 TARGET_COLUMN = "income"
 
 # =====================================================
-# DATA LOADING
+# LOAD DATA
 # =====================================================
 
 @st.cache_data
 def load_dataset():
-    df = pd.read_csv(DATA_PATH)
-    if df.empty:
-        raise ValueError("Dataset empty.")
-    return df
-
-# =====================================================
-# LOAD PREPROCESSOR + MODELS
-# =====================================================
-
-@st.cache_resource
-def load_preprocessor():
-    return joblib.load(os.path.join(MODEL_FOLDER, "preprocessor.joblib"))
-
-@st.cache_resource
-def load_model(path):
-    return joblib.load(path)
-
-@st.cache_data
-def convert_to_csv_bytes(df):
-    return df.to_csv(index=False).encode("utf-8")
+    return pd.read_csv(DATA_PATH)
 
 df = load_dataset()
-preprocessor = load_preprocessor()
 
 # =====================================================
-# METRICS
+# LOAD PREPROCESS CONFIG (VERSION-PROOF)
 # =====================================================
 
-def calculate_metrics(y_true, y_pred, prob=None):
+with open(os.path.join(MODEL_FOLDER, "preprocessing_config.json")) as f:
+    config = json.load(f)
 
-    scores = {}
-
-    scores["Accuracy"] = accuracy_score(y_true, y_pred)
-    scores["Precision"] = precision_score(y_true, y_pred, average="macro")
-    scores["Recall"] = recall_score(y_true, y_pred, average="macro")
-    scores["F1"] = f1_score(y_true, y_pred, average="macro")
-    scores["MCC"] = matthews_corrcoef(y_true, y_pred)
-
-    try:
-        if prob is not None:
-            if len(np.unique(y_true)) == 2:
-                scores["AUC"] = roc_auc_score(y_true, prob[:,1])
-            else:
-                scores["AUC"] = roc_auc_score(y_true, prob, multi_class="ovr")
-    except:
-        scores["AUC"] = None
-
-    return scores
+num_cols = config["numeric_cols"]
+cat_cols = config["categorical_cols"]
 
 # =====================================================
-# LOAD AVAILABLE MODELS
+# REBUILD PREPROCESSOR (SAFE)
 # =====================================================
 
-available_models = {
-    f.replace(".joblib",""): os.path.join(MODEL_FOLDER, f)
-    for f in os.listdir(MODEL_FOLDER)
-    if f.endswith(".joblib") and f != "preprocessor.joblib"
-}
+num_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
 
-if not available_models:
-    st.error("No models found in model folder.")
-    st.stop()
+cat_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(
+        handle_unknown="ignore",
+        sparse_output=True,
+        min_frequency=0.02
+    ))
+])
+
+preprocessor = ColumnTransformer([
+    ("num", num_pipeline, num_cols),
+    ("cat", cat_pipeline, cat_cols)
+])
 
 # =====================================================
 # PREPROCESS DATA
@@ -101,99 +80,112 @@ y = df[TARGET_COLUMN]
 if y.dtype == "object":
     y = y.astype("category").cat.codes
 
-X_transformed = preprocessor.transform(X)
-X_transformed = X_transformed.astype(np.float32)
+# Fit preprocessor dynamically (version-proof)
+preprocessor.fit(X)
+
+X_t = preprocessor.transform(X).astype(np.float32)
 
 # =====================================================
-# UI NAVIGATION
+# LOAD MODELS (EXCLUDE PREPROCESSOR)
 # =====================================================
 
-tab_eval, tab_compare = st.tabs(["🔎 Evaluate Model", "🏆 Compare Models"])
+MODEL_NAMES = [
+    "LogisticRegression",
+    "DecisionTree",
+    "KNN",
+    "NaiveBayes",
+    "RandomForest",
+    "XGBoost"
+]
+
+available_models = {
+    name: os.path.join(MODEL_FOLDER, f"{name}.joblib")
+    for name in MODEL_NAMES
+}
 
 # =====================================================
-# MODEL COMPARISON TAB
+# SIDEBAR MODEL SELECTION
 # =====================================================
 
-with tab_compare:
+model_choice = st.sidebar.selectbox(
+    "Select Model",
+    list(available_models.keys())
+)
 
-    st.header("🏆 Model Benchmark Leaderboard")
-
-    comp_path = os.path.join(MODEL_FOLDER, "comparison_table.csv")
-    comp_df = pd.read_csv(comp_path, index_col=0)
-
-    metric_choice = st.selectbox(
-        "Sort models by metric",
-        comp_df.columns
-    )
-
-    comp_df = comp_df.sort_values(metric_choice, ascending=False)
-
-    st.dataframe(comp_df.style.background_gradient(cmap="Greens"))
-
-    fig, ax = plt.subplots(figsize=(10,5))
-    sns.barplot(data=comp_df.reset_index())
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
-
-    st.success(f"🥇 Best model: {comp_df.index[0]}")
+st.header(f"🔎 {model_choice} Model Analysis")
 
 # =====================================================
-# MODEL EVALUATION TAB
+# LOAD MODEL
 # =====================================================
 
-with tab_eval:
+model = joblib.load(available_models[model_choice])
 
-    st.info("Target column fixed as 'income'. Auto evaluation enabled.")
+# NaiveBayes requires dense matrix
+if model_choice == "NaiveBayes":
+    X_input = X_t.toarray()
+else:
+    X_input = X_t
 
-    model_choice = st.sidebar.selectbox(
-        "Select Model",
-        list(available_models.keys())
-    )
+# =====================================================
+# PREDICTIONS
+# =====================================================
 
-    st.header(f"🔎 {model_choice} Model Analysis")
+y_pred = model.predict(X_input)
 
-    model = load_model(available_models[model_choice])
+# =====================================================
+# METRICS DISPLAY
+# =====================================================
 
-    # GaussianNB requires dense input
-    if model_choice == "NaiveBayes":
-        X_input = X_transformed.toarray()
-    else:
-        X_input = X_transformed
+cols = st.columns(5)
 
-    y_pred = model.predict(X_input)
+cols[0].metric("Accuracy", f"{accuracy_score(y,y_pred):.3f}")
+cols[1].metric("Precision", f"{precision_score(y,y_pred,average='macro'):.3f}")
+cols[2].metric("Recall", f"{recall_score(y,y_pred,average='macro'):.3f}")
+cols[3].metric("F1", f"{f1_score(y,y_pred,average='macro'):.3f}")
+cols[4].metric("MCC", f"{matthews_corrcoef(y,y_pred):.3f}")
 
-    try:
-        y_prob = model.predict_proba(X_input)
-    except:
-        y_prob = None
+# =====================================================
+# CONFUSION MATRIX
+# =====================================================
 
-    scores = calculate_metrics(y, y_pred, y_prob)
+st.subheader("Confusion Matrix")
 
-    cols = st.columns(6)
+fig, ax = plt.subplots()
+sns.heatmap(confusion_matrix(y,y_pred), annot=True, fmt="d", ax=ax)
+st.pyplot(fig)
 
-    for i, key in enumerate(["Accuracy","AUC","Precision","Recall","F1","MCC"]):
-        val = scores.get(key)
-        cols[i].metric(key, f"{val:.3f}" if isinstance(val,float) else "N/A")
+# =====================================================
+# CLASSIFICATION REPORT
+# =====================================================
 
-    st.subheader("Confusion Matrix")
+st.subheader("Classification Report")
 
-    fig, ax = plt.subplots()
-    sns.heatmap(confusion_matrix(y,y_pred), annot=True, fmt="d", ax=ax)
-    st.pyplot(fig)
+report = classification_report(y,y_pred,output_dict=True)
+st.dataframe(pd.DataFrame(report).transpose().round(3))
 
-    st.subheader("Classification Report")
-    report = classification_report(y,y_pred,output_dict=True)
-    st.dataframe(pd.DataFrame(report).transpose().round(3))
+# =====================================================
+# SHOW PREDICTIONS
+# =====================================================
 
-    pred_df = X.copy()
-    pred_df["Actual"] = y
-    pred_df["Predicted"] = y_pred
+st.subheader("Predictions Preview")
 
-    st.dataframe(pred_df.head(500))
+pred_df = X.copy()
+pred_df["Actual"] = y
+pred_df["Predicted"] = y_pred
 
-    st.download_button(
-        "⬇ Download Predictions CSV",
-        convert_to_csv_bytes(pred_df),
-        file_name=f"{model_choice}_predictions.csv",
-        mime="text/csv"
-    )
+st.dataframe(pred_df.head(500))
+
+# =====================================================
+# DOWNLOAD BUTTON
+# =====================================================
+
+@st.cache_data
+def convert_to_csv(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+st.download_button(
+    "⬇ Download Predictions CSV",
+    convert_to_csv(pred_df),
+    file_name=f"{model_choice}_predictions.csv",
+    mime="text/csv"
+)
