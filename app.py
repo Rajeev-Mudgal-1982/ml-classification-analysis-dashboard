@@ -25,7 +25,7 @@ MODEL_FOLDER = "model"
 TARGET_COLUMN = "income"
 
 # -----------------------------------------------------
-# HuggingFace model URLs
+# Model URLs (Kept on HugginFace due to size limitations on GitHub)
 # -----------------------------------------------------
 
 HF_MODEL_URLS = {
@@ -60,7 +60,7 @@ def download_single_file(filename, url):
 @st.cache_resource
 def download_models_parallel():
 
-    st.info("🚀 Models retrieved")
+    st.info("🚀 Models Retrived")
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
@@ -187,7 +187,7 @@ with tab_eval:
         list(available_models.keys())
     )
 
-    # Dynamic header
+    # Dynamic header based on selected model
     st.header(f"🔎 {model_choice} Model Analysis")
 
     X = df.drop(columns=[TARGET_COLUMN])
