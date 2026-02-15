@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import requests
+from concurrent.futures import ThreadPoolExecutor
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -22,23 +24,76 @@ DATA_PATH = "data/adult.csv"
 MODEL_FOLDER = "model"
 TARGET_COLUMN = "income"
 
+# -----------------------------------------------------
+# HuggingFace model URLs
+# -----------------------------------------------------
+
+HF_MODEL_URLS = {
+    "LogisticRegression.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/LogisticRegression.joblib",
+    "DecisionTree.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/DecisionTree.joblib",
+    "KNN.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/KNN.joblib",
+    "NaiveBayes.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/NaiveBayes.joblib",
+    "RandomForest.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/RandomForest.joblib",
+    "XGBoost.joblib": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/XGBoost.joblib",
+    "comparison_table.csv": "https://huggingface.co/Rajeev-Mudgal-1982/ml-classification-analysis-models/resolve/main/comparison_table.csv"
+}
+
 # =====================================================
-# GLOBAL DATA LOADING (DEPLOYMENT SAFE)
+# ENTERPRISE HUGGINGFACE DOWNLOADER
 # =====================================================
 
-@st.cache_data(show_spinner=False)
+def download_single_file(filename, url):
+
+    local_path = os.path.join(MODEL_FOLDER, filename)
+
+    os.makedirs(MODEL_FOLDER, exist_ok=True)
+
+    response = requests.get(url, stream=True, timeout=60)
+    response.raise_for_status()
+
+    with open(local_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+
+@st.cache_resource
+def download_models_parallel():
+
+    st.info("🚀 Models retrieved from HuggingFace")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+
+        for filename, url in HF_MODEL_URLS.items():
+            futures.append(executor.submit(download_single_file, filename, url))
+
+        for future in futures:
+            future.result()
+
+    return True
+
+# Run once
+download_models_parallel()
+
+# =====================================================
+# GLOBAL DATA LOADING
+# =====================================================
+
+@st.cache_data
 def load_dataset():
     df = pd.read_csv(DATA_PATH)
     if df.empty:
-        raise ValueError("Dataset is empty.")
+        raise ValueError("Dataset empty.")
     return df
 
 @st.cache_resource
 def load_model_safe(path):
+
     try:
         return joblib.load(path)
     except Exception as e:
-        st.error("❌ Model failed to load (likely sklearn version mismatch).")
+        st.error("❌ Model load failed (likely sklearn version mismatch)")
         st.code(str(e))
         st.stop()
 
@@ -46,15 +101,10 @@ def load_model_safe(path):
 def convert_to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
 
-# Load dataset once globally
-try:
-    DATAFRAME = load_dataset()
-except Exception as e:
-    st.error(f"Dataset failed to load: {e}")
-    st.stop()
+DATAFRAME = load_dataset()
 
 # =====================================================
-# METRIC COMPUTATION
+# METRICS
 # =====================================================
 
 def calculate_metrics(y_true, y_pred, prob=None):
@@ -67,18 +117,14 @@ def calculate_metrics(y_true, y_pred, prob=None):
     scores["F1"] = f1_score(y_true, y_pred, average="macro")
     scores["MCC"] = matthews_corrcoef(y_true, y_pred)
 
-    auc = None
-
-    if prob is not None:
-        try:
+    try:
+        if prob is not None:
             if len(np.unique(y_true)) == 2:
-                auc = roc_auc_score(y_true, prob[:,1])
+                scores["AUC"] = roc_auc_score(y_true, prob[:,1])
             else:
-                auc = roc_auc_score(y_true, prob, multi_class="ovr")
-        except:
-            auc = None
-
-    scores["AUC"] = auc
+                scores["AUC"] = roc_auc_score(y_true, prob, multi_class="ovr")
+    except:
+        scores["AUC"] = None
 
     return scores
 
@@ -92,17 +138,13 @@ available_models = {
     if f.endswith(".joblib")
 }
 
-if not available_models:
-    st.error("No trained models detected.")
-    st.stop()
+df = DATAFRAME
 
 # =====================================================
-# NAVIGATION
+# UI NAVIGATION
 # =====================================================
 
 tab_eval, tab_compare = st.tabs(["🔎 Evaluate Model", "🏆 Compare Models"])
-
-df = DATAFRAME
 
 # =====================================================
 # MODEL COMPARISON TAB
@@ -114,136 +156,82 @@ with tab_compare:
 
     comp_path = os.path.join(MODEL_FOLDER, "comparison_table.csv")
 
-    if os.path.exists(comp_path):
+    comp_df = pd.read_csv(comp_path, index_col=0)
 
-        comp_df = pd.read_csv(comp_path, index_col=0)
+    metric_choice = st.selectbox(
+        "Sort models by metric",
+        comp_df.columns
+    )
 
-        metric_choice = st.selectbox(
-            "Sort models by metric",
-            comp_df.columns
-        )
+    comp_df = comp_df.sort_values(metric_choice, ascending=False)
 
-        comp_df = comp_df.sort_values(metric_choice, ascending=False)
+    st.dataframe(comp_df.style.background_gradient(cmap="Greens"))
 
-        st.dataframe(comp_df.style.background_gradient(cmap="Greens"))
+    fig, ax = plt.subplots(figsize=(10,5))
+    sns.barplot(data=comp_df.reset_index())
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
 
-        st.subheader("Visual Benchmark Chart")
-
-        fig, ax = plt.subplots(figsize=(10,5))
-        sns.barplot(data=comp_df.reset_index())
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-
-        st.success(f"🥇 Best model based on {metric_choice}: {comp_df.index[0]}")
-
-    st.subheader("Dataset Preview")
-    st.dataframe(df.head(100))
+    st.success(f"🥇 Best model: {comp_df.index[0]}")
 
 # =====================================================
-# MODEL EVALUATION TAB (AUTO EXECUTION)
+# MODEL EVALUATION TAB
 # =====================================================
 
 with tab_eval:
 
-    st.header("🔎 Single Model Analysis")
-
-    st.info("Target column is fixed as 'income'. Evaluation runs automatically.")
+    st.info("Target column fixed as 'income'. Auto evaluation enabled.")
 
     model_choice = st.sidebar.selectbox(
         "Select Model",
         list(available_models.keys())
     )
 
-    st.subheader("Dataset Preview")
-    st.dataframe(df.head(100))
+    # Dynamic header
+    st.header(f"🔎 {model_choice} Model Analysis")
 
-    # -------------------------------------------------
-    # AUTO EXECUTION
-    # -------------------------------------------------
+    X = df.drop(columns=[TARGET_COLUMN])
+    y = df[TARGET_COLUMN]
 
-    with st.spinner("Running model evaluation..."):
+    if y.dtype == "object":
+        y = y.astype("category").cat.codes
 
-        if TARGET_COLUMN not in df.columns:
-            st.error(f"Target column '{TARGET_COLUMN}' not found.")
-            st.stop()
+    model = load_model_safe(available_models[model_choice])
 
-        X = df.drop(columns=[TARGET_COLUMN])
-        y = df[TARGET_COLUMN]
+    y_pred = model.predict(X)
 
-        if y.dtype == "object":
-            y = y.astype("category").cat.codes
+    try:
+        y_prob = model.predict_proba(X)
+    except:
+        y_prob = None
 
-        model = load_model_safe(available_models[model_choice])
+    scores = calculate_metrics(y, y_pred, y_prob)
 
-        y_pred = model.predict(X)
+    cols = st.columns(6)
 
-        try:
-            y_prob = model.predict_proba(X)
-        except:
-            y_prob = None
+    for i, key in enumerate(["Accuracy","AUC","Precision","Recall","F1","MCC"]):
+        val = scores.get(key)
+        cols[i].metric(key, f"{val:.3f}" if isinstance(val,float) else "N/A")
 
-        scores = calculate_metrics(y, y_pred, y_prob)
+    st.subheader("Confusion Matrix")
 
-        # Metrics cards
-        cols = st.columns(6)
+    fig, ax = plt.subplots()
+    sns.heatmap(confusion_matrix(y,y_pred), annot=True, fmt="d", ax=ax)
+    st.pyplot(fig)
 
-        for i, key in enumerate(["Accuracy","AUC","Precision","Recall","F1","MCC"]):
-            val = scores[key]
-            cols[i].metric(key, f"{val:.3f}" if isinstance(val,float) else "N/A")
+    st.subheader("Classification Report")
+    report = classification_report(y,y_pred,output_dict=True)
+    st.dataframe(pd.DataFrame(report).transpose().round(3))
 
-        # Confusion Matrix
-        st.subheader("Confusion Matrix")
+    pred_df = X.copy()
+    pred_df["Actual"] = y
+    pred_df["Predicted"] = y_pred
 
-        fig, ax = plt.subplots()
-        sns.heatmap(confusion_matrix(y,y_pred), annot=True, fmt="d", ax=ax)
-        st.pyplot(fig)
+    st.dataframe(pred_df.head(500))
 
-        # ROC Curve
-        if y_prob is not None and len(np.unique(y)) == 2:
-            st.subheader("ROC Curve")
-            fpr, tpr, _ = roc_curve(y, y_prob[:,1])
-            fig2, ax2 = plt.subplots()
-            ax2.plot(fpr,tpr)
-            ax2.plot([0,1],[0,1],'--')
-            st.pyplot(fig2)
-
-        # Classification Report
-        st.subheader("Classification Report")
-        report = classification_report(y,y_pred,output_dict=True)
-        st.dataframe(pd.DataFrame(report).transpose().round(3))
-
-        # Feature Importance (if supported)
-        if hasattr(model.named_steps["clf"], "feature_importances_"):
-
-            st.subheader("Feature Importance")
-
-            imp = model.named_steps["clf"].feature_importances_
-            names = model.named_steps["preproc"].get_feature_names_out()
-
-            imp_df = pd.DataFrame({
-                "Feature": names,
-                "Importance": imp
-            }).sort_values("Importance", ascending=False).head(20)
-
-            st.bar_chart(imp_df.set_index("Feature"))
-
-        # Predictions
-        st.subheader("Predictions")
-
-        pred_df = X.copy()
-        pred_df["Actual"] = y
-        pred_df["Predicted"] = y_pred
-
-        if y_prob is not None:
-            prob_df = pd.DataFrame(y_prob)
-            prob_df.columns = [f"Prob_{i}" for i in range(prob_df.shape[1])]
-            pred_df = pd.concat([pred_df, prob_df], axis=1)
-
-        st.dataframe(pred_df.head(500))
-
-        st.download_button(
-            "⬇ Download Predictions CSV",
-            convert_to_csv_bytes(pred_df),
-            file_name=f"{model_choice}_predictions.csv",
-            mime="text/csv"
-        )
+    st.download_button(
+        "⬇ Download Predictions CSV",
+        convert_to_csv_bytes(pred_df),
+        file_name=f"{model_choice}_predictions.csv",
+        mime="text/csv"
+    )
