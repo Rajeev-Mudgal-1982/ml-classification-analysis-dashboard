@@ -60,7 +60,7 @@ def download_single_file(filename, url):
 @st.cache_resource
 def download_models_parallel():
 
-    st.info("🚀 Models retrieved from HuggingFace")
+    st.info("🚀 Models retrieved")
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
