@@ -1,6 +1,7 @@
 # train_models.py
 
 import os
+import json
 import numpy as np
 import pandas as pd
 import joblib
@@ -24,8 +25,8 @@ from xgboost import XGBClassifier
 
 DATA_PATH = "data/adult.csv"
 TARGET_COL = "income"
-
 MODEL_DIR = "model"
+
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # =====================================================
@@ -48,11 +49,24 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 # =====================================================
-# PREPROCESSOR (NO CUSTOM CLASS)
+# DETERMINE COLUMN TYPES
 # =====================================================
 
-num_cols = X.select_dtypes(include=["int64", "float64"]).columns
-cat_cols = X.select_dtypes(include=["object", "category"]).columns
+num_cols = list(X.select_dtypes(include=["int64","float64"]).columns)
+cat_cols = list(X.select_dtypes(include=["object","category"]).columns)
+
+# SAVE PREPROCESSING CONFIG (VERSION PROOF)
+config = {
+    "numeric_cols": num_cols,
+    "categorical_cols": cat_cols
+}
+
+with open(f"{MODEL_DIR}/preprocessing_config.json","w") as f:
+    json.dump(config,f)
+
+# =====================================================
+# BUILD PREPROCESSOR (TRAINING ONLY)
+# =====================================================
 
 num_pipeline = Pipeline([
     ("imputer", SimpleImputer(strategy="median")),
@@ -73,16 +87,11 @@ preprocessor = ColumnTransformer([
     ("cat", cat_pipeline, cat_cols)
 ])
 
-print("Fitting preprocessor...")
-X_train_transformed = preprocessor.fit_transform(X_train)
-X_test_transformed = preprocessor.transform(X_test)
+X_train_t = preprocessor.fit_transform(X_train)
+X_test_t = preprocessor.transform(X_test)
 
-# Convert to float32 WITHOUT custom class
-X_train_transformed = X_train_transformed.astype(np.float32)
-X_test_transformed = X_test_transformed.astype(np.float32)
-
-# Save preprocessor separately
-joblib.dump(preprocessor, f"{MODEL_DIR}/preprocessor.joblib")
+X_train_t = X_train_t.astype(np.float32)
+X_test_t = X_test_t.astype(np.float32)
 
 # =====================================================
 # MODELS
@@ -96,8 +105,7 @@ models = {
     "RandomForest": RandomForestClassifier(
         n_estimators=40,
         max_depth=10,
-        min_samples_leaf=5,
-        n_jobs=-1
+        min_samples_leaf=5
     ),
     "XGBoost": XGBClassifier(
         n_estimators=60,
@@ -112,12 +120,12 @@ models = {
 
 for name, model in models.items():
 
-    print(f"\nTraining {name}")
+    print(f"Training {name}")
 
     if name == "NaiveBayes":
-        model.fit(X_train_transformed.toarray(), y_train)
+        model.fit(X_train_t.toarray(), y_train)
     else:
-        model.fit(X_train_transformed, y_train)
+        model.fit(X_train_t, y_train)
 
     joblib.dump(model, f"{MODEL_DIR}/{name}.joblib", compress=("lzma",6))
 
